@@ -4,6 +4,37 @@
 
 本项目采用 [GNU Lesser General Public License v3.0](LICENSE) 授权。
 
+## 一键安装（Ubuntu / Debian）
+
+克隆仓库后直接运行安装脚本：
+
+```bash
+git clone https://github.com/ACGNworld/clash-tui.git
+cd clash-tui
+./install.sh
+```
+
+脚本会依次完成：
+
+1. 检测 CPU 架构，下载并安装对应版本的 mihomo 内核（默认取最新 release）。安装方式会交互询问：
+   - **系统安装**：使用 `sudo dpkg -i`，安装到 `/usr/bin/mihomo`
+   - **用户级解包**：无需 `sudo`，二进制放到 `~/.local/bin/mihomo`
+2. 生成或补齐 `~/.config/mihomo/config.yaml`（包含 `external-controller` 和随机 `secret`）
+3. 创建并启用 systemd 用户服务 `mihomo-tui.service`
+4. 编译 `clash-tui` 并安装到 `~/.local/bin`
+5. 写入 `~/.config/clash-tui/settings.json`，让 Controller 地址、secret、服务名、内核路径全部对齐
+
+安装完成后，新开一个终端即可直接输入 `clash-tui`。常用选项：
+
+```bash
+./install.sh --help                       # 查看全部选项
+./install.sh --mihomo-version v1.19.32    # 指定内核版本
+./install.sh --mirror https://ghfast.top  # GitHub 下载缓慢时使用镜像
+./install.sh --deb-mode user              # 跳过询问，改为用户级解包安装
+```
+
+> 目前仅支持 Ubuntu/Debian，并且只创建**用户级** systemd 服务；系统级服务和其它发行版会在后续补充。
+
 ## 环境要求
 
 - Linux 或其他支持 Rust、`crossterm` 的终端环境
