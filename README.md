@@ -2,6 +2,8 @@
 
 `clash-tui` 是 Mihomo/Clash 的终端控制台，用于查看内核状态、切换代理节点、测速、管理订阅和活动连接。
 
+本项目采用 [GNU Lesser General Public License v3.0](LICENSE) 授权。
+
 ## 环境要求
 
 - Linux 或其他支持 Rust、`crossterm` 的终端环境

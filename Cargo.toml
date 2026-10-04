@@ -3,6 +3,7 @@ name = "clash-tui"
 version = "0.1.0"
 edition = "2021"
 description = "Mihomo/Clash 终端控制器"
+license = "LGPL-3.0-only"
 
 [dependencies]
 ratatui = "0.29"
