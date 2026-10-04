@@ -77,8 +77,6 @@ pub struct Rule {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Provider {
-    #[serde(default)]
-    pub name: String,
     #[serde(rename = "vehicleType", default)]
     pub vehicle_type: String,
     #[serde(rename = "updatedAt", default)]
@@ -107,8 +105,6 @@ pub struct Connection {
     #[serde(default)]
     pub download: u64,
     #[serde(default)]
-    pub start: String,
-    #[serde(default)]
     pub chains: Vec<String>,
     #[serde(default)]
     pub rule: String,
@@ -126,8 +122,6 @@ pub struct ConnectionMeta {
     pub destination_ip: String,
     #[serde(rename = "destinationPort", default)]
     pub destination_port: String,
-    #[serde(rename = "sourceIP", default)]
-    pub source_ip: String,
     #[serde(rename = "network", default)]
     pub network: String,
     #[serde(rename = "type", default)]
@@ -203,7 +197,9 @@ impl Client {
     }
 
     pub async fn version(&self) -> Result<String> {
-        let value = self.value(self.req(reqwest::Method::GET, "/version")).await?;
+        let value = self
+            .value(self.req(reqwest::Method::GET, "/version"))
+            .await?;
         Ok(value
             .get("version")
             .and_then(|v| v.as_str())
@@ -234,7 +230,9 @@ impl Client {
     }
 
     pub async fn proxies(&self) -> Result<HashMap<String, Proxy>> {
-        let value = self.value(self.req(reqwest::Method::GET, "/proxies")).await?;
+        let value = self
+            .value(self.req(reqwest::Method::GET, "/proxies"))
+            .await?;
         let map = value
             .get("proxies")
             .cloned()
@@ -262,14 +260,15 @@ impl Client {
             timeout_ms
         );
         let value = self.value(self.req(reqwest::Method::GET, &path)).await?;
-        let delay = value
-            .get("delay")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        Ok(delay)
+        Ok(parse_delay(&value))
     }
 
-    pub async fn group_delay(&self, group: &str, url: &str, timeout_ms: u64) -> Result<HashMap<String, u64>> {
+    pub async fn group_delay(
+        &self,
+        group: &str,
+        url: &str,
+        timeout_ms: u64,
+    ) -> Result<HashMap<String, u64>> {
         let path = format!(
             "/group/{}/delay?url={}&timeout={}",
             Self::encode(group),
@@ -277,15 +276,7 @@ impl Client {
             timeout_ms
         );
         let value = self.value(self.req(reqwest::Method::GET, &path)).await?;
-        let mut out = HashMap::new();
-        if let Some(object) = value.as_object() {
-            for (key, entry) in object {
-                if let Some(delay) = entry.get("delay").and_then(|v| v.as_u64()) {
-                    out.insert(key.clone(), delay);
-                }
-            }
-        }
-        Ok(out)
+        Ok(parse_group_delays(&value))
     }
 
     pub async fn providers(&self) -> Result<HashMap<String, Provider>> {
@@ -300,23 +291,19 @@ impl Client {
     }
 
     pub async fn update_provider(&self, name: &str) -> Result<()> {
-        self.value(
-            self.req(
-                reqwest::Method::PUT,
-                &format!("/providers/proxies/{}", Self::encode(name)),
-            ),
-        )
+        self.value(self.req(
+            reqwest::Method::PUT,
+            &format!("/providers/proxies/{}", Self::encode(name)),
+        ))
         .await?;
         Ok(())
     }
 
     pub async fn provider_healthcheck(&self, name: &str) -> Result<()> {
-        self.value(
-            self.req(
-                reqwest::Method::GET,
-                &format!("/providers/proxies/{}/healthcheck", Self::encode(name)),
-            ),
-        )
+        self.value(self.req(
+            reqwest::Method::GET,
+            &format!("/providers/proxies/{}/healthcheck", Self::encode(name)),
+        ))
         .await?;
         Ok(())
     }
@@ -344,9 +331,10 @@ impl Client {
     }
 
     pub async fn close_connection(&self, id: &str) -> Result<()> {
-        self.value(
-            self.req(reqwest::Method::DELETE, &format!("/connections/{}", Self::encode(id))),
-        )
+        self.value(self.req(
+            reqwest::Method::DELETE,
+            &format!("/connections/{}", Self::encode(id)),
+        ))
         .await?;
         Ok(())
     }
@@ -365,5 +353,53 @@ impl Client {
             bail!("流式接口 {path} 返回 HTTP {}", response.status().as_u16());
         }
         Ok(response)
+    }
+}
+
+fn parse_group_delays(value: &serde_json::Value) -> HashMap<String, u64> {
+    let mut out = HashMap::new();
+    let Some(object) = value.as_object() else {
+        return out;
+    };
+    for (key, entry) in object {
+        let delay = entry
+            .as_u64()
+            .or_else(|| entry.get("delay").and_then(|v| v.as_u64()));
+        if let Some(delay) = delay {
+            out.insert(key.clone(), delay);
+        }
+    }
+    out
+}
+
+fn parse_delay(value: &serde_json::Value) -> u64 {
+    value
+        .as_u64()
+        .or_else(|| value.get("delay").and_then(|v| v.as_u64()))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_delay, parse_group_delays};
+
+    #[test]
+    fn accepts_numeric_and_object_delays() {
+        assert_eq!(parse_delay(&serde_json::json!(42)), 42);
+        assert_eq!(parse_delay(&serde_json::json!({"delay": 180})), 180);
+        assert_eq!(parse_delay(&serde_json::json!({"error": "timeout"})), 0);
+    }
+
+    #[test]
+    fn accepts_numeric_and_object_group_delays() {
+        let value = serde_json::json!({
+            "fast": 42,
+            "wrapped": {"delay": 180},
+            "invalid": "timeout"
+        });
+        let delays = parse_group_delays(&value);
+        assert_eq!(delays.get("fast"), Some(&42));
+        assert_eq!(delays.get("wrapped"), Some(&180));
+        assert!(!delays.contains_key("invalid"));
     }
 }

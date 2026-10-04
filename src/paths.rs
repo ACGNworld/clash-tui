@@ -27,7 +27,3 @@ pub fn subscriptions_path() -> PathBuf {
 pub fn logs_dir() -> PathBuf {
     tui_dir().join("logs")
 }
-
-pub fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
-}

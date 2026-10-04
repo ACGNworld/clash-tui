@@ -4,6 +4,7 @@ mod configfile;
 mod kernel;
 mod paths;
 mod settings;
+mod shell;
 mod ui;
 
 use std::io::stdout;

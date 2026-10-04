@@ -64,7 +64,10 @@ pub async fn status(unit: &str) -> Result<KernelStatus> {
         active: state == "active",
         state,
         sub: values.get("SubState").cloned().unwrap_or_default(),
-        since: values.get("ActiveEnterTimestamp").cloned().unwrap_or_default(),
+        since: values
+            .get("ActiveEnterTimestamp")
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
@@ -89,30 +92,13 @@ pub async fn control(unit: &str, action: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub async fn journal(unit: &str, lines: usize) -> Result<String> {
-    let output = Command::new("journalctl")
-        .args([
-            "--user",
-            "-u",
-            unit,
-            "-n",
-            &lines.to_string(),
-            "--no-pager",
-        ])
-        .output()
-        .await
-        .context("无法执行 journalctl")?;
-    if !output.status.success() {
-        bail!(
-            "journalctl 失败：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
 /// 无 systemd 时的兜底：脱离终端启动内核，TUI 退出后仍运行。
-pub async fn detached_start(binary: &str, config_dir: &str, config_file: &str, log: &Path) -> Result<()> {
+pub async fn detached_start(
+    binary: &str,
+    config_dir: &str,
+    config_file: &str,
+    log: &Path,
+) -> Result<()> {
     if let Some(parent) = log.parent() {
         std::fs::create_dir_all(parent).ok();
     }

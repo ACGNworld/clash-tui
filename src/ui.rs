@@ -1,19 +1,13 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Sparkline, Tabs, Wrap};
 use ratatui::Frame;
 
 use crate::app::{connection_target, setting_value, App, Overlay, SETTING_FIELDS};
 
 const TAB_TITLES: [&str; 7] = [
-    "1 状态",
-    "2 代理",
-    "3 订阅",
-    "4 规则",
-    "5 连接",
-    "6 日志",
-    "7 设置",
+    "1 状态", "2 代理", "3 订阅", "4 规则", "5 连接", "6 日志", "7 设置",
 ];
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -81,13 +75,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         (None, None) => ("内核状态…".to_string(), Color::DarkGray),
     };
     let version = app.version.clone().unwrap_or_else(|| "未连接".to_string());
-    let proxy_state = if app
-        .configs
-        .as_ref()
-        .map(|c| c.mode.as_str())
-        .unwrap_or("")
-        == "direct"
-    {
+    let proxy_state = if app.configs.as_ref().map(|c| c.mode.as_str()).unwrap_or("") == "direct" {
         ("代理已关闭", Color::Red)
     } else {
         ("代理已开启", Color::Green)
@@ -143,12 +131,20 @@ fn block(title: &str) -> Block<'_> {
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::vertical([Constraint::Min(8), Constraint::Length(5)]).split(area);
     let (up, down) = app.traffic_text();
     let kernel_line = match &app.kernel {
         Some(status) => format!(
-            "运行状态：{}  单元：{}  自 {}",
-            if status.active { "运行中" } else { "已停止" },
+            "运行状态：{}  单元：{}  加载 {}  状态 {}/{}  自 {}",
+            if status.active {
+                "运行中"
+            } else {
+                "已停止"
+            },
             app.settings.service,
+            status.loaded,
+            status.state,
+            status.sub,
             if status.since.is_empty() {
                 "-".to_string()
             } else {
@@ -171,8 +167,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     );
     let config_line = match &app.configs {
         Some(configs) => format!(
-            "内核配置：端口 {}  允许局域网 {}  IPv6 {}  日志级别 {}",
+            "内核配置：端口 {}（HTTP {} / SOCKS {}）  允许局域网 {}  IPv6 {}  日志级别 {}",
             configs.mixed_port,
+            configs.port,
+            configs.socks_port,
             yesno(configs.allow_lan),
             yesno(configs.ipv6),
             configs.log_level
@@ -184,7 +182,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         human_total(app.traffic.up_total),
         human_total(app.traffic.down_total)
     );
-    let conn_line = format!("活动连接：{}    订阅数：{}", app.conn_count, app.subscriptions.len());
+    let conn_line = format!(
+        "活动连接：{}    订阅数：{}",
+        app.conn_count,
+        app.subscriptions.len()
+    );
 
     let lines = vec![
         Line::from(kernel_line),
@@ -201,13 +203,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw("    "),
             Span::styled(
-                if app
-                    .configs
-                    .as_ref()
-                    .map(|c| c.mode.as_str())
-                    .unwrap_or("")
-                    == "direct"
-                {
+                if app.configs.as_ref().map(|c| c.mode.as_str()).unwrap_or("") == "direct" {
                     "（代理已关闭，全部直连）"
                 } else {
                     "（代理已开启）"
@@ -232,7 +228,30 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(lines)
             .block(block("状态"))
             .wrap(Wrap { trim: false }),
-        area,
+        chunks[0],
+    );
+
+    let upload: Vec<u64> = app.traffic_history.iter().map(|sample| sample.up).collect();
+    let download: Vec<u64> = app
+        .traffic_history
+        .iter()
+        .map(|sample| sample.down)
+        .collect();
+    let charts = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[1]);
+    frame.render_widget(
+        Sparkline::default()
+            .block(block("上传速率（最近 60 秒）"))
+            .data(&upload)
+            .style(Style::default().fg(Color::Green)),
+        charts[0],
+    );
+    frame.render_widget(
+        Sparkline::default()
+            .block(block("下载速率（最近 60 秒）"))
+            .data(&download)
+            .style(Style::default().fg(Color::Cyan)),
+        charts[1],
     );
 }
 
@@ -301,7 +320,13 @@ fn draw_proxies(frame: &mut Frame, app: &App, area: Rect) {
             let proxy_kind = app
                 .proxies
                 .get(node)
-                .map(|p| kind_label(&p.kind).to_string())
+                .map(|p| {
+                    if p.udp {
+                        format!("{} UDP", kind_label(&p.kind))
+                    } else {
+                        kind_label(&p.kind).to_string()
+                    }
+                })
                 .unwrap_or_default();
             let delay = render_delay(app, node);
             let marker = if is_current { "● " } else { "  " };
@@ -338,7 +363,13 @@ fn draw_proxies(frame: &mut Frame, app: &App, area: Rect) {
     }
     let title = app
         .current_group()
-        .map(|g| format!("节点 · {} · 当前 {}", g.name, if g.now.is_empty() { "-" } else { &g.now }))
+        .map(|g| {
+            format!(
+                "节点 · {} · 当前 {}",
+                g.name,
+                if g.now.is_empty() { "-" } else { &g.now }
+            )
+        })
         .unwrap_or_else(|| "节点".to_string());
     let node_list = List::new(node_items)
         .block(block(&title))
@@ -387,7 +418,7 @@ fn draw_subs(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|sub| {
             let provider = app.providers.get(&sub.name);
-            let (count, updated) = match provider {
+            let (count, updated, vehicle) = match provider {
                 Some(p) => (
                     p.proxies.len().to_string(),
                     if p.updated_at.is_empty() {
@@ -395,8 +426,13 @@ fn draw_subs(frame: &mut Frame, app: &App, area: Rect) {
                     } else {
                         p.updated_at.clone()
                     },
+                    if p.vehicle_type.is_empty() {
+                        "-".to_string()
+                    } else {
+                        p.vehicle_type.clone()
+                    },
                 ),
-                None => ("-".to_string(), "-".to_string()),
+                None => ("-".to_string(), "-".to_string(), "-".to_string()),
             };
             let line = Line::from(vec![
                 Span::styled(
@@ -412,7 +448,7 @@ fn draw_subs(frame: &mut Frame, app: &App, area: Rect) {
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    format!("节点 {count}  更新 {updated}"),
+                    format!("节点 {count}  更新 {updated}  类型 {vehicle}"),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]);
@@ -541,7 +577,10 @@ fn draw_connections(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(index, conn)| {
-            let kind = match (conn.metadata.kind.is_empty(), conn.metadata.network.is_empty()) {
+            let kind = match (
+                conn.metadata.kind.is_empty(),
+                conn.metadata.network.is_empty(),
+            ) {
                 (false, false) => format!("{}/{}", conn.metadata.kind, conn.metadata.network),
                 (false, true) => conn.metadata.kind.clone(),
                 (true, false) => conn.metadata.network.clone(),
@@ -643,7 +682,11 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     let title = format!(
         "日志（{}）{}",
         total,
-        if app.log_follow { " · 跟随中" } else { " · 已暂停" }
+        if app.log_follow {
+            " · 跟随中"
+        } else {
+            " · 已暂停"
+        }
     );
     let body = Paragraph::new(lines)
         .block(block(&title))
@@ -739,7 +782,9 @@ fn draw_overlay(frame: &mut Frame, overlay: &Overlay, area: Rect) {
             let lines = vec![
                 Line::from(Span::styled(
                     "clash-tui 帮助",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
                 Line::from("Tab / 1-7     切换标签页"),

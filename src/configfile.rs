@@ -211,16 +211,15 @@ pub fn set_rule(text: &str, target: Option<&str>) -> Result<String> {
         format!("  {RULE_END}\n"),
     ];
 
-    if let Some(index) = lines
-        .iter()
-        .position(|line| line.trim() == RULE_BEGIN)
-    {
+    if let Some(index) = lines.iter().position(|line| line.trim() == RULE_BEGIN) {
         let end = lines
             .iter()
             .skip(index)
             .position(|line| line.trim() == RULE_END)
             .map(|offset| index + offset)
-            .context(format!("发现 {RULE_BEGIN} 却没有 {RULE_END}，请手动修复文件"))?;
+            .context(format!(
+                "发现 {RULE_BEGIN} 却没有 {RULE_END}，请手动修复文件"
+            ))?;
         if target.is_none() {
             lines.drain(index..=end);
             return Ok(lines.concat());
@@ -238,7 +237,10 @@ pub fn set_rule(text: &str, target: Option<&str>) -> Result<String> {
         return Ok(text.to_string());
     }
 
-    if let Some(index) = lines.iter().position(|line| top_level_key(line) == Some("rules")) {
+    if let Some(index) = lines
+        .iter()
+        .position(|line| top_level_key(line) == Some("rules"))
+    {
         let trimmed = lines[index].trim_end().to_string();
         if trimmed.ends_with("[]") {
             lines[index] = format!("{}\n", trimmed.trim_end_matches("[]").trim_end());
@@ -252,13 +254,14 @@ pub fn set_rule(text: &str, target: Option<&str>) -> Result<String> {
         suffix.push('\n');
     }
     let separator = if suffix.trim().is_empty() { "" } else { "\n" };
-    Ok(format!(
-        "{suffix}{separator}rules:\n{}",
-        body.concat()
-    ))
+    Ok(format!("{suffix}{separator}rules:\n{}", body.concat()))
 }
 
-pub fn build(original: &str, items: &[Subscription], rule_target: Option<&str>) -> Result<(String, Action)> {
+pub fn build(
+    original: &str,
+    items: &[Subscription],
+    rule_target: Option<&str>,
+) -> Result<(String, Action)> {
     let block = render_block(items)?;
     let (text, action) = replace_block(original, &block)?;
     let conflicts: Vec<String> = top_level_keys(&text)
@@ -288,8 +291,8 @@ pub async fn apply(
     client: Option<&Client>,
 ) -> Result<Action> {
     let path = Path::new(config_path);
-    let original = fs::read_to_string(path)
-        .with_context(|| format!("无法读取 {}", path.display()))?;
+    let original =
+        fs::read_to_string(path).with_context(|| format!("无法读取 {}", path.display()))?;
     let mode = fs::metadata(path)
         .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0o600);
@@ -312,5 +315,72 @@ pub async fn apply(
             let _ = client.reload(config_path).await;
             bail!("内核拒绝了新配置，文件已还原：{error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build, render_block, set_rule, Action, BEGIN, END};
+    use crate::settings::Subscription;
+
+    fn subscription(name: &str, group: &str) -> Subscription {
+        Subscription {
+            name: name.to_string(),
+            url: format!("https://example.test/{name}"),
+            interval: 3600,
+            health_interval: 60,
+            group: group.to_string(),
+            health_url: "https://example.test/204".to_string(),
+        }
+    }
+
+    #[test]
+    fn creates_and_replaces_managed_block() {
+        let item = subscription("alpha", "main");
+        let (created, action) =
+            build("mixed-port: 7890\n", std::slice::from_ref(&item), None).unwrap();
+        assert_eq!(action, Action::Created);
+        assert!(created.contains(BEGIN));
+        assert!(created.contains("proxy-providers:"));
+        assert!(created.contains("url: 'https://example.test/alpha'"));
+
+        let (unchanged, action) = build(&created, &[item], None).unwrap();
+        assert_eq!(action, Action::Unchanged);
+        assert_eq!(unchanged, created);
+
+        let (removed, action) = build(&created, &[], None).unwrap();
+        assert_eq!(action, Action::Replaced);
+        assert!(!removed.contains("proxy-providers:"));
+        assert!(removed.contains("mixed-port: 7890"));
+        assert!(removed.contains(END));
+    }
+
+    #[test]
+    fn manages_fallback_rule_without_touching_other_rules() {
+        let original = "rules:\n  - DOMAIN-SUFFIX,example.com,DIRECT\n";
+        let with_rule = set_rule(original, Some("main")).unwrap();
+        assert!(with_rule.contains("MATCH,main"));
+        assert!(with_rule.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
+
+        let removed = set_rule(&with_rule, None).unwrap();
+        assert!(!removed.contains("MATCH,main"));
+        assert!(removed.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
+    }
+
+    #[test]
+    fn rejects_duplicate_top_level_managed_keys() {
+        let original = "proxy-providers:\n  old: {}\n";
+        let error = build(original, &[subscription("alpha", "main")], None)
+            .expect_err("duplicate managed key must be rejected");
+        assert!(error.to_string().contains("proxy-providers"));
+    }
+
+    #[test]
+    fn rejects_invalid_subscription_names_and_urls() {
+        let mut item = subscription("bad name", "main");
+        assert!(render_block(&[item.clone()]).is_err());
+        item.name = "valid".to_string();
+        item.url = "file:///tmp/provider.yaml".to_string();
+        assert!(render_block(&[item]).is_err());
     }
 }

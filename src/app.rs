@@ -8,12 +8,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::backend::Backend;
 use ratatui::Terminal;
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, RwLock};
 
 use crate::client::{Client, Configs, Connection, Provider, Proxy, Rule, Traffic};
 use crate::kernel::KernelStatus;
 use crate::settings::{self, Settings, Subscription};
-use crate::{configfile, kernel, paths, ui};
+use crate::{configfile, kernel, paths, shell, ui};
 
 pub type Tx = mpsc::UnboundedSender<Msg>;
 
@@ -155,6 +155,7 @@ pub struct App {
     pub kernel: Option<KernelStatus>,
     pub kernel_error: Option<String>,
     pub traffic: Traffic,
+    pub traffic_history: VecDeque<Traffic>,
     pub conn_count: usize,
     pub connections: Vec<Connection>,
     pub conn_index: usize,
@@ -208,6 +209,7 @@ impl App {
             kernel: None,
             kernel_error: None,
             traffic: Traffic::default(),
+            traffic_history: VecDeque::with_capacity(60),
             conn_count: 0,
             connections: Vec::new(),
             conn_index: 0,
@@ -363,17 +365,17 @@ impl App {
                 self.message = None;
             }
         }
-        if self.tick % 2 == 0 {
+        if self.tick.is_multiple_of(2) {
             self.spawn_version(tx);
             self.spawn_configs(tx);
             self.spawn_proxies(tx);
             self.spawn_connections(tx);
         }
-        if self.tick % 5 == 0 {
+        if self.tick.is_multiple_of(5) {
             self.spawn_providers(tx);
             self.spawn_rules(tx);
         }
-        if self.tick % 3 == 0 {
+        if self.tick.is_multiple_of(3) {
             self.spawn_kernel(tx);
         }
     }
@@ -427,7 +429,7 @@ impl App {
                 self.pending_connections = false;
                 if let Ok(mut connections) = result {
                     // 按下载量降序，让最活跃的连接排在最前。
-                    connections.sort_by(|a, b| b.download.cmp(&a.download));
+                    connections.sort_by_key(|connection| std::cmp::Reverse(connection.download));
                     // 刷新会让行号变化，按 id 保住当前选中项。
                     let selected = self.connections.get(self.conn_index).map(|c| c.id.clone());
                     self.connections = connections;
@@ -467,7 +469,11 @@ impl App {
                 }
             }
             Msg::Traffic(traffic) => {
-                self.traffic = traffic;
+                self.traffic = traffic.clone();
+                self.traffic_history.push_back(traffic);
+                while self.traffic_history.len() > 60 {
+                    self.traffic_history.pop_front();
+                }
             }
             Msg::Log { level, payload } => {
                 self.logs.push_back(LogLine { level, payload });
@@ -508,10 +514,7 @@ impl App {
     }
 
     fn clamp_node_index(&mut self) {
-        let len = self
-            .current_group()
-            .map(|g| g.nodes.len())
-            .unwrap_or(0);
+        let len = self.current_group().map(|g| g.nodes.len()).unwrap_or(0);
         if self.node_index >= len {
             self.node_index = len.saturating_sub(1);
         }
@@ -714,10 +717,8 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.rule_index = self.rule_index.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.rule_index + 1 < self.rules.len() {
-                    self.rule_index += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if self.rule_index + 1 < self.rules.len() => {
+                self.rule_index += 1;
             }
             _ => {}
         }
@@ -825,7 +826,10 @@ impl App {
         let overlay = self.overlay.clone();
         match overlay {
             Some(Overlay::Help) => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')) {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
+                ) {
                     self.overlay = None;
                 }
             }
@@ -839,7 +843,9 @@ impl App {
                                 if self.sub_index >= self.subscriptions.len() {
                                     self.sub_index = self.subscriptions.len().saturating_sub(1);
                                 }
-                                if let Err(error) = settings::save_subscriptions(&self.subscriptions) {
+                                if let Err(error) =
+                                    settings::save_subscriptions(&self.subscriptions)
+                                {
                                     self.set_message(format!("保存失败：{error}"), true);
                                 } else {
                                     self.apply_subscriptions(tx);
@@ -985,9 +991,26 @@ impl App {
         let client = self.client.clone();
         let url = self.settings.test_url.clone();
         let timeout = self.settings.test_timeout;
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.nodes.iter().any(|candidate| candidate == &node))
+            .map(|group| group.name.clone());
         let tx = tx.clone();
         tokio::spawn(async move {
-            let result = client.delay(&node, &url, timeout).await;
+            let single = client.delay(&node, &url, timeout).await;
+            let result = match (&single, group.as_deref()) {
+                (Ok(delay), _) if *delay > 0 => single,
+                (_, Some(group)) => match client.group_delay(group, &url, timeout).await {
+                    Ok(delays) => delays
+                        .get(&node)
+                        .copied()
+                        .or(single.ok())
+                        .ok_or_else(|| anyhow::anyhow!("内核未返回该节点的测速结果")),
+                    Err(_) => single,
+                },
+                _ => single,
+            };
             let _ = tx.send(Msg::Delay {
                 target: node,
                 result,
@@ -1009,23 +1032,32 @@ impl App {
         let client = self.client.clone();
         let url = self.settings.test_url.clone();
         let timeout = self.settings.test_timeout;
-        let workers = self.settings.workers.max(1);
         let tx = tx.clone();
         tokio::spawn(async move {
-            let semaphore = Arc::new(Semaphore::new(workers));
-            for node in group.nodes.clone() {
-                let semaphore = semaphore.clone();
-                let client = client.clone();
-                let url = url.clone();
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let _permit = semaphore.acquire().await;
-                    let result = client.delay(&node, &url, timeout).await;
-                    let _ = tx.send(Msg::Delay {
-                        target: node,
-                        result,
-                    });
-                });
+            let result = client.group_delay(&group.name, &url, timeout).await;
+            match result {
+                Ok(delays) => {
+                    for node in group.nodes {
+                        let result = delays
+                            .get(&node)
+                            .copied()
+                            .ok_or_else(|| anyhow::anyhow!("内核未返回该节点的测速结果"));
+                        let _ = tx.send(Msg::Delay {
+                            target: node,
+                            result,
+                        });
+                    }
+                }
+                Err(error) => {
+                    let detail = error.to_string();
+                    for node in group.nodes {
+                        let result = Err(anyhow::anyhow!("整组测速失败：{detail}"));
+                        let _ = tx.send(Msg::Delay {
+                            target: node,
+                            result,
+                        });
+                    }
+                }
             }
         });
     }
@@ -1053,6 +1085,10 @@ impl App {
     }
 
     fn set_mode(&mut self, mode: &str, tx: &Tx) {
+        self.set_mode_with_hint(mode, tx, false);
+    }
+
+    fn set_mode_with_hint(&mut self, mode: &str, tx: &Tx, proxy_hint: bool) {
         let client = self.client.clone();
         let tx = tx.clone();
         let label = match mode {
@@ -1062,11 +1098,34 @@ impl App {
             _ => mode.to_string(),
         };
         let mode = mode.to_string();
+        let port = self
+            .configs
+            .as_ref()
+            .map(|configs| configs.mixed_port)
+            .filter(|port| *port != 0)
+            .unwrap_or(self.settings.env_port);
         tokio::spawn(async move {
-            let result = client
-                .set_mode(&mode)
-                .await
-                .map(|_| format!("已切换到{label}"));
+            let result = match client.set_mode(&mode).await {
+                Ok(_) => match shell::set_proxy_environment(mode != "direct", port) {
+                    Ok(()) => {
+                        let message = if mode == "direct" {
+                            format!("已切换到{label}，已从 ~/.bashrc 移除代理声明")
+                        } else {
+                            let suffix = if proxy_hint {
+                                format!("；当前端口 127.0.0.1:{port}")
+                            } else {
+                                String::new()
+                            };
+                            format!(
+                                "已切换到{label}，已更新 ~/.bashrc（新终端或 source ~/.bashrc 后生效）{suffix}"
+                            )
+                        };
+                        Ok(message)
+                    }
+                    Err(error) => Ok(format!("已切换到{label}，但更新 ~/.bashrc 失败：{error}")),
+                },
+                Err(error) => Err(error),
+            };
             let _ = tx.send(Msg::Action(result));
         });
     }
@@ -1082,7 +1141,7 @@ impl App {
             "global" => "direct",
             _ => "rule",
         };
-        self.set_mode(next, tx);
+        self.set_mode_with_hint(next, tx, true);
     }
 
     fn toggle_proxy(&mut self, tx: &Tx) {
@@ -1091,7 +1150,11 @@ impl App {
             .as_ref()
             .map(|c| c.mode.as_str())
             .unwrap_or("rule");
-        let next = if current == "direct" { "rule" } else { "direct" };
+        let next = if current == "direct" {
+            "rule"
+        } else {
+            "direct"
+        };
         self.set_mode(next, tx);
     }
 
