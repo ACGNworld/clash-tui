@@ -16,13 +16,17 @@ cd clash-tui
 
 脚本会依次完成：
 
-1. 检测 CPU 架构，下载并安装对应版本的 mihomo 内核（默认取最新 release）。安装方式会交互询问：
+1. 检查 `curl`、`python3`、`python3-yaml`、用户服务会话和已有内核冲突，解析配置。安装方式会交互询问：
    - **系统安装**：使用 `sudo dpkg -i`，安装到 `/usr/bin/mihomo`
    - **用户级解包**：无需 `sudo`，二进制放到 `~/.local/bin/mihomo`
-2. 生成或补齐 `~/.config/mihomo/config.yaml`（包含 `external-controller` 和随机 `secret`）
-3. 创建并启用 systemd 用户服务 `mihomo-tui.service`
-4. 编译 `clash-tui` 并安装到 `~/.local/bin`
-5. 写入 `~/.config/clash-tui/settings.json`，让 Controller 地址、secret、服务名、内核路径全部对齐
+2. 下载对应 CPU 架构的 mihomo 内核（默认最新 release），编译 `clash-tui`；编译成功后才安装二进制
+3. 生成或补齐 `~/.config/mihomo/config.yaml`；需要修改已有配置时先备份为 `config.yaml.bak`
+4. 写入 `~/.config/clash-tui/settings.json`，保留其它设置，让 Controller 地址、secret、服务名、内核路径全部对齐
+5. 创建并启用 systemd 用户服务 `mihomo-tui.service`，最多等待 15 秒确认 Controller 连接正常；失败时退出并打印状态和日志
+
+缺少配置处理依赖时先执行 `sudo apt-get install curl python3 python3-yaml`。使用 `XDG_CONFIG_HOME` 时，配置、设置和用户服务文件均写入该目录。
+
+已有系统级 `mihomo.service` 正在运行时，脚本会在安装前退出，提示先停止原服务。没有 systemd 用户会话时，可用 `--skip-service` 只安装；使用 `--skip-build` 时仍会检查 Controller，无需已安装 TUI。默认配置只有 `MATCH,DIRECT`，需要在 TUI 中添加订阅后才能使用代理节点。
 
 安装完成后，新开一个终端即可直接输入 `clash-tui`。常用选项：
 
@@ -31,7 +35,10 @@ cd clash-tui
 ./install.sh --mihomo-version v1.19.32    # 指定内核版本
 ./install.sh --mirror https://ghfast.top  # GitHub 下载缓慢时使用镜像
 ./install.sh --deb-mode user              # 跳过询问，改为用户级解包安装
+./install.sh --deb-mode user --skip-service # 只安装，不启动服务
 ```
+
+`--mirror` 只代理内核下载。无法访问 GitHub 查询最新版本时，请同时指定 `--mihomo-version` 和 `--mirror`；版本查询有超时限制，不会无限等待。
 
 > 目前仅支持 Ubuntu/Debian，并且只创建**用户级** systemd 服务；系统级服务和其它发行版会在后续补充。
 
@@ -149,6 +156,7 @@ export HTTPS_PROXY=http://127.0.0.1:7890
 ## 开发检查
 
 ```bash
+python3 -m unittest discover -s tests -v
 cargo fmt -- --check
 cargo test --offline
 cargo clippy --offline --all-targets --all-features -- -D warnings
